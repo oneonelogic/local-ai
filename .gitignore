@@ -1,0 +1,10 @@
+# Node
+node_modules/
+
+# Vault index — contains the FULL TEXT of all personal Obsidian notes.
+# NEVER commit or push this. Rebuild locally with: node index-vault.mjs
+vault-index.json
+vault-vectors.*
+
+# OS / editor cruft
+.DS_Store

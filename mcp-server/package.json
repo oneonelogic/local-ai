@@ -1,0 +1,15 @@
+{
+  "name": "local-qwen-mcp",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "MCP server that lets Claude Code delegate subtasks to the local Qwen model on cyberpc (Ollama, RTX 4090).",
+  "main": "server.mjs",
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "zod": "^3.23.8"
+  }
+}

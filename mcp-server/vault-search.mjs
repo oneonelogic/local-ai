@@ -7,7 +7,8 @@ import { readFile, writeFile, readdir, stat } from "node:fs/promises";
 import { join, relative, extname, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const OLLAMA_URL = process.env.OLLAMA_URL || "http://192.168.1.232:11434";
+import { pickHost } from "./hosts.mjs";
+
 const EMBED_MODEL = process.env.EMBED_MODEL || "nomic-embed-text";
 const VAULT_PATH =
   process.env.VAULT_PATH || "/Users/gconz/Documents/gconz_obsidian_vault";
@@ -26,12 +27,16 @@ const EMBED_TIMEOUT_MS = 60000;
 export async function embed(texts, kind = "document", onProgress) {
   const prefix = kind === "query" ? "search_query: " : "search_document: ";
   const out = [];
+  // The index stores vectors from one specific embedding model; query vectors
+  // from a different model would be meaningless against them. So the host must
+  // have EMBED_MODEL itself — any reachable box will not do.
+  const host = await pickHost(EMBED_MODEL);
   for (let i = 0; i < texts.length; i += BATCH) {
     const batch = texts.slice(i, i + BATCH).map((t) => prefix + t);
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), EMBED_TIMEOUT_MS);
     try {
-      const res = await fetch(`${OLLAMA_URL}/api/embed`, {
+      const res = await fetch(`${host.url}/api/embed`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ model: EMBED_MODEL, input: batch }),

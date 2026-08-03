@@ -7,10 +7,8 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { search as searchVault } from "./vault-search.mjs";
+import { HOSTS, pickHost, probeStatus, invalidateProbeCache } from "./hosts.mjs";
 
-const OLLAMA_URL = process.env.OLLAMA_URL || "http://192.168.1.232:11434";
-const DEFAULT_MODEL = process.env.LOCAL_MODEL || "qwen3-coder:30b";
-const NUM_CTX = Number(process.env.LOCAL_NUM_CTX || 32768);
 // 30B on a 4090 can take a while for long outputs; generous ceiling.
 const TIMEOUT_MS = Number(process.env.LOCAL_TIMEOUT_MS || 600000);
 
@@ -20,11 +18,11 @@ const DEFAULT_SYSTEM =
   "result (code, text, or answer) with no preamble, no apologies, and no " +
   "meta-commentary unless explicitly asked. If given context, use it faithfully.";
 
-async function ollama(path, body) {
+async function ollama(host, path, body) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
   try {
-    const res = await fetch(`${OLLAMA_URL}${path}`, {
+    const res = await fetch(`${host.url}${path}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
@@ -40,18 +38,6 @@ async function ollama(path, body) {
   }
 }
 
-async function ollamaGet(path) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 15000);
-  try {
-    const res = await fetch(`${OLLAMA_URL}${path}`, { signal: controller.signal });
-    if (!res.ok) throw new Error(`Ollama ${res.status} ${res.statusText}`);
-    return await res.json();
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
 const server = new McpServer({ name: "local-qwen", version: "1.0.0" });
 
 server.registerTool(
@@ -59,12 +45,14 @@ server.registerTool(
   {
     title: "Delegate a subtask to local Qwen",
     description:
-      "Hand a well-scoped subtask to the local Qwen model on cyberpc (free, " +
-      "unmetered, runs on the RTX 4090). Good for boilerplate, first-draft " +
-      "tests/docstrings, summarizing or explaining a file, mechanical edits, " +
-      "and other parallelizable grunt work. NOT for hard reasoning, subtle " +
-      "bugs, or multi-file architecture — keep those on Claude. Always review " +
-      "what it returns. Pass file contents or data via `context`.",
+      "Hand a well-scoped subtask to a local Qwen model (free, unmetered, runs " +
+      "on a local RTX 4090). Routes to GCONZ-WIN-AI when it is powered on, and " +
+      "falls back automatically to the always-on GCONZ-OPS otherwise. Good for " +
+      "boilerplate, first-draft tests/docstrings, summarizing or explaining a " +
+      "file, mechanical edits, and other parallelizable grunt work. NOT for " +
+      "hard reasoning, subtle bugs, or multi-file architecture — keep those on " +
+      "Claude. Always review what it returns. Pass file contents or data via " +
+      "`context`.",
     inputSchema: {
       task: z
         .string()
@@ -76,7 +64,11 @@ server.registerTool(
       model: z
         .string()
         .optional()
-        .describe(`Model tag to use. Default: ${DEFAULT_MODEL}.`),
+        .describe(
+          "Model tag to use. Omit to use whichever host answers and its own " +
+            `default (${HOSTS.map((h) => `${h.name}: ${h.model}`).join(", ")}). ` +
+            "Naming a model restricts routing to hosts that actually have it."
+        ),
       temperature: z
         .number()
         .optional()
@@ -86,37 +78,57 @@ server.registerTool(
   async ({ task, context, model, temperature }) => {
     const prompt = context ? `${task}\n\n--- CONTEXT ---\n${context}` : task;
     const started = Date.now();
-    try {
-      const data = await ollama("/api/chat", {
-        model: model || DEFAULT_MODEL,
-        messages: [
-          { role: "system", content: DEFAULT_SYSTEM },
-          { role: "user", content: prompt },
-        ],
-        stream: false,
-        options: {
-          num_ctx: NUM_CTX,
-          temperature: temperature ?? 0.2,
-        },
-      });
-      const secs = ((Date.now() - started) / 1000).toFixed(1);
-      const out = data?.message?.content ?? "(empty response)";
-      const evalCount = data?.eval_count ?? "?";
-      const footer = `\n\n---\n[local ${model || DEFAULT_MODEL} · ${evalCount} tokens · ${secs}s]`;
-      return { content: [{ type: "text", text: out + footer }] };
-    } catch (err) {
-      return {
-        isError: true,
-        content: [
-          {
-            type: "text",
-            text:
-              `Local delegation failed: ${err.message}\n\n` +
-              `Check that cyberpc (${OLLAMA_URL}) is up and Ollama is running.`,
+    const tried = [];
+    let lastErr;
+
+    // Two passes: if the chosen host dies mid-request (it can be powered off at
+    // any moment), re-probe and try whatever else is up before giving up.
+    for (let attempt = 0; attempt < HOSTS.length; attempt++) {
+      let host;
+      try {
+        host = await pickHost(model, { exclude: tried });
+      } catch (err) {
+        lastErr = err;
+        break;
+      }
+      tried.push(host.name);
+      const useModel = model || host.model;
+      try {
+        const data = await ollama(host, "/api/chat", {
+          model: useModel,
+          messages: [
+            { role: "system", content: DEFAULT_SYSTEM },
+            { role: "user", content: prompt },
+          ],
+          stream: false,
+          options: {
+            num_ctx: host.numCtx,
+            temperature: temperature ?? 0.2,
           },
-        ],
-      };
+        });
+        const secs = ((Date.now() - started) / 1000).toFixed(1);
+        const out = data?.message?.content ?? "(empty response)";
+        const evalCount = data?.eval_count ?? "?";
+        const footer = `\n\n---\n[${host.name} · ${useModel} · ${evalCount} tokens · ${secs}s]`;
+        return { content: [{ type: "text", text: out + footer }] };
+      } catch (err) {
+        lastErr = err;
+        invalidateProbeCache(); // this host just proved unreliable; re-probe
+      }
     }
+
+    return {
+      isError: true,
+      content: [
+        {
+          type: "text",
+          text:
+            `Local delegation failed: ${lastErr?.message ?? "unknown error"}\n\n` +
+            (tried.length ? `Tried: ${tried.join(", ")}.\n` : "") +
+            `Hosts in pool: ${HOSTS.map((h) => `${h.name} @ ${h.url}`).join(", ")}.`,
+        },
+      ],
+    };
   }
 );
 
@@ -125,43 +137,54 @@ server.registerTool(
   {
     title: "Local AI status",
     description:
-      "Report whether the local Ollama box (cyberpc) is reachable, which " +
-      "models are installed, and which are currently loaded in the GPU.",
+      "Report which local Ollama hosts are reachable (cyberpc, then the " +
+      "always-on GCONZ-OPS fallback), which models each has installed, and " +
+      "which are currently loaded in GPU.",
     inputSchema: {},
   },
   async () => {
-    try {
-      const [tags, ps] = await Promise.all([
-        ollamaGet("/api/tags"),
-        ollamaGet("/api/ps").catch(() => ({ models: [] })),
-      ]);
-      const installed = (tags.models || [])
-        .map((m) => `  - ${m.name} (${(m.size / 1e9).toFixed(1)} GB)`)
-        .join("\n");
-      const loaded = (ps.models || []).length
-        ? (ps.models || [])
-            .map((m) => `  - ${m.name} → ${m.size_vram ? (m.size_vram / 1e9).toFixed(1) + " GB in VRAM" : "loaded"}`)
-            .join("\n")
-        : "  (none currently loaded)";
-      return {
-        content: [
-          {
-            type: "text",
-            text:
-              `cyberpc Ollama reachable at ${OLLAMA_URL}\n\n` +
-              `Installed models:\n${installed}\n\n` +
-              `Loaded in GPU now:\n${loaded}`,
-          },
-        ],
-      };
-    } catch (err) {
-      return {
-        isError: true,
-        content: [
-          { type: "text", text: `cyberpc unreachable at ${OLLAMA_URL}: ${err.message}` },
-        ],
-      };
-    }
+    invalidateProbeCache(); // an explicit status check should never read stale
+    const status = await probeStatus();
+
+    const blocks = await Promise.all(
+      status.map(async ({ host, live }) => {
+        if (!live) return `✗ ${host.name} (${host.url}) — unreachable`;
+
+        const ps = await fetch(`${host.url}/api/ps`)
+          .then((r) => (r.ok ? r.json() : { models: [] }))
+          .catch(() => ({ models: [] }));
+
+        const installed = live.models.length
+          ? live.models.map((m) => `    - ${m}`).join("\n")
+          : "    (none)";
+        const loaded = (ps.models || []).length
+          ? (ps.models || [])
+              .map(
+                (m) =>
+                  `    - ${m.name} → ${
+                    m.size_vram ? (m.size_vram / 1e9).toFixed(1) + " GB in VRAM" : "loaded"
+                  }`
+              )
+              .join("\n")
+          : "    (none currently loaded)";
+
+        return (
+          `✓ ${host.name} (${host.url}) — default model ${host.model}, num_ctx ${host.numCtx}\n` +
+          `  installed:\n${installed}\n` +
+          `  loaded in GPU now:\n${loaded}`
+        );
+      })
+    );
+
+    const up = status.filter((s) => s.live);
+    const header = up.length
+      ? `Delegation would route to: ${up[0].host.name}\n\n`
+      : `No local host is reachable — delegation will fail.\n\n`;
+
+    return {
+      content: [{ type: "text", text: header + blocks.join("\n\n") }],
+      ...(up.length ? {} : { isError: true }),
+    };
   }
 );
 
@@ -215,7 +238,8 @@ server.registerTool(
             text:
               `Vault search failed: ${err.message}\n\n` +
               `If the index is missing, run: node index-vault.mjs\n` +
-              `Embeddings require cyberpc (${OLLAMA_URL}) to be up.`,
+              `Search needs a host with the "${process.env.EMBED_MODEL || "nomic-embed-text"}" ` +
+              `embedding model: ${HOSTS.map((h) => `${h.name} @ ${h.url}`).join(", ")}.`,
           },
         ],
       };

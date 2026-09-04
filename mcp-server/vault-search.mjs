@@ -11,7 +11,7 @@ import { pickHost } from "./hosts.mjs";
 
 const EMBED_MODEL = process.env.EMBED_MODEL || "nomic-embed-text";
 const VAULT_PATH =
-  process.env.VAULT_PATH || "/Users/gconz/Documents/gconz_obsidian_vault";
+  process.env.VAULT_PATH || "/Users/gconz/Docs";
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 export const INDEX_PATH = process.env.VAULT_INDEX || join(__dir, "vault-index.json");

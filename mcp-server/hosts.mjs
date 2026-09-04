@@ -30,7 +30,8 @@ export const HOSTS = ENV_URL
       },
       {
         name: "GCONZ-OPS",
-        url: "http://192.168.1.153:11434",
+        // Wired IP — OPS's Wi-Fi (.153) was retired 2026-08-07.
+        url: "http://192.168.1.212:11434",
         model: "qwen2.5-coder:14b",
         // Laptop 4090 is AD103 with only 16 GB. The 14B weights take ~9 GB and
         // this model's KV cache runs ~0.19 MB/token, so 32k context would need

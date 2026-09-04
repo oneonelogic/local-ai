@@ -194,7 +194,7 @@ server.registerTool(
     title: "Search the Obsidian vault",
     description:
       "Semantic + keyword search over gconz's personal Obsidian notes " +
-      "(~/Documents/gconz_obsidian_vault). Returns the most relevant note " +
+      "(~/Docs). Returns the most relevant note " +
       "chunks with their file path and heading so you can read the source. " +
       "Use it to recall past decisions, project context, ideas, sermons, or " +
       "anything gconz has written down. Embeddings run locally on cyberpc; " +
